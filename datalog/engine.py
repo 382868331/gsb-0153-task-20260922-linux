@@ -69,6 +69,30 @@ def _fmt_fact(fact):
     return f"{fact[0]}({', '.join(repr(a) for a in fact[1:])})"
 
 
+def _render_explain(fact, derivations, rules, leaf_label=None):
+    """Render the derivation DAG of ``fact`` as an indented source chain.
+
+    ``leaf_label(fact)`` customises the line suffix for facts without a
+    derivation; the default is the historical ``[input fact]``.
+    """
+    if leaf_label is None:
+        leaf_label = lambda f: "[input fact]"
+    lines = []
+
+    def walk(f, depth):
+        d = derivations.get(f)
+        pad = "  " * depth
+        if d is None:
+            lines.append(f"{pad}{_fmt_fact(f)}  {leaf_label(f)}")
+            return
+        lines.append(f"{pad}{_fmt_fact(f)}  <= rule {d.rule_index}: {rules[d.rule_index]!r}")
+        for child in d.children:
+            walk(child, depth + 1)
+
+    walk(fact, 0)
+    return "\n".join(lines)
+
+
 # --- Result ---------------------------------------------------------------
 
 class Result:
@@ -124,25 +148,12 @@ class Result:
         fact = tuple(fact)
         if fact not in self.facts:
             raise KeyError(f"unknown fact {fact!r}")
-        lines = []
-
-        def walk(f, depth):
-            d = self._derivations.get(f)
-            pad = "  " * depth
-            if d is None:
-                lines.append(f"{pad}{_fmt_fact(f)}  [input fact]")
-                return
-            lines.append(f"{pad}{_fmt_fact(f)}  <= rule {d.rule_index}: {self._rules[d.rule_index]!r}")
-            for child in d.children:
-                walk(child, depth + 1)
-
-        walk(fact, 0)
-        return "\n".join(lines)
+        return _render_explain(fact, self._derivations, self._rules)
 
 
 # --- Validation -----------------------------------------------------------
 
-def _validate_facts(facts):
+def _validate_facts(facts, limit=MAX_INPUT_FACTS):
     if isinstance(facts, (str, bytes)) or not hasattr(facts, "__iter__"):
         raise ValidationError(
             f"facts must be an iterable of atom tuples, got {type(facts).__name__}"
@@ -162,14 +173,14 @@ def _validate_facts(facts):
         if fact not in seen:  # set semantics: duplicates collapse (documented)
             seen.add(fact)
             out.append(fact)
-    if len(out) > MAX_INPUT_FACTS:
+    if len(out) > limit:
         raise LimitError(
-            f"too many distinct facts: {len(out)} > limit {MAX_INPUT_FACTS}"
+            f"too many distinct facts: {len(out)} > limit {limit}"
         )
     return out
 
 
-def _validate_rules(rules):
+def _validate_rules(rules, limit=MAX_RULES):
     if isinstance(rules, (str, bytes)) or not hasattr(rules, "__iter__"):
         raise ValidationError(
             f"rules must be an iterable of Rule objects, got {type(rules).__name__}"
@@ -201,12 +212,12 @@ def _validate_rules(rules):
                 check_term(arg, f"{lwhere}, argument {j}")
             body.append(lit)
         out.append(Rule(head, body))
-    if len(out) > MAX_RULES:
-        raise LimitError(f"too many rules: {len(out)} > limit {MAX_RULES}")
+    if len(out) > limit:
+        raise LimitError(f"too many rules: {len(out)} > limit {limit}")
     return out
 
 
-def _check_predicates_and_arity(facts, rules):
+def _check_predicates_and_arity(facts, rules, limit=MAX_PREDICATES):
     arity = {}
 
     def note(pred, n, where):
@@ -225,9 +236,9 @@ def _check_predicates_and_arity(facts, rules):
         note(rule.head[0], len(rule.head) - 1, f"rule {ri}, head")
         for bi, lit in enumerate(rule.body):
             note(lit.atom[0], len(lit.atom) - 1, f"rule {ri}, body literal {bi}")
-    if len(arity) > MAX_PREDICATES:
+    if len(arity) > limit:
         raise LimitError(
-            f"too many distinct predicates: {len(arity)} > limit {MAX_PREDICATES}"
+            f"too many distinct predicates: {len(arity)} > limit {limit}"
         )
     return arity
 
