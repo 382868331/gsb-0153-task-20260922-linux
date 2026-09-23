@@ -142,7 +142,20 @@ class Result:
 
 # --- Validation -----------------------------------------------------------
 
-def _validate_facts(facts):
+def _check_fact(fact, where):
+    """Validate one ground fact tuple; return it normalized to a tuple."""
+    if not isinstance(fact, (tuple, list)) or not fact:
+        raise ValidationError(f"{where}: fact must be a non-empty tuple, got {fact!r}")
+    fact = tuple(fact)
+    check_predicate(fact[0], where)
+    for j, arg in enumerate(fact[1:]):
+        if isinstance(arg, Var):
+            raise ValidationError(f"{where}: facts must be ground, found variable {arg!r}")
+        check_constant(arg, f"{where}, argument {j}")
+    return fact
+
+
+def _validate_facts(facts, *, max_input_facts=MAX_INPUT_FACTS):
     if isinstance(facts, (str, bytes)) or not hasattr(facts, "__iter__"):
         raise ValidationError(
             f"facts must be an iterable of atom tuples, got {type(facts).__name__}"
@@ -150,26 +163,18 @@ def _validate_facts(facts):
     out = []
     seen = set()
     for i, fact in enumerate(facts):
-        where = f"fact {i}"
-        if not isinstance(fact, (tuple, list)) or not fact:
-            raise ValidationError(f"{where}: fact must be a non-empty tuple, got {fact!r}")
-        fact = tuple(fact)
-        check_predicate(fact[0], where)
-        for j, arg in enumerate(fact[1:]):
-            if isinstance(arg, Var):
-                raise ValidationError(f"{where}: facts must be ground, found variable {arg!r}")
-            check_constant(arg, f"{where}, argument {j}")
+        fact = _check_fact(fact, f"fact {i}")
         if fact not in seen:  # set semantics: duplicates collapse (documented)
             seen.add(fact)
             out.append(fact)
-    if len(out) > MAX_INPUT_FACTS:
+    if len(out) > max_input_facts:
         raise LimitError(
-            f"too many distinct facts: {len(out)} > limit {MAX_INPUT_FACTS}"
+            f"too many distinct facts: {len(out)} > limit {max_input_facts}"
         )
     return out
 
 
-def _validate_rules(rules):
+def _validate_rules(rules, *, max_rules=MAX_RULES):
     if isinstance(rules, (str, bytes)) or not hasattr(rules, "__iter__"):
         raise ValidationError(
             f"rules must be an iterable of Rule objects, got {type(rules).__name__}"
@@ -201,12 +206,12 @@ def _validate_rules(rules):
                 check_term(arg, f"{lwhere}, argument {j}")
             body.append(lit)
         out.append(Rule(head, body))
-    if len(out) > MAX_RULES:
-        raise LimitError(f"too many rules: {len(out)} > limit {MAX_RULES}")
+    if len(out) > max_rules:
+        raise LimitError(f"too many rules: {len(out)} > limit {max_rules}")
     return out
 
 
-def _check_predicates_and_arity(facts, rules):
+def _check_predicates_and_arity(facts, rules, *, max_predicates=MAX_PREDICATES):
     arity = {}
 
     def note(pred, n, where):
@@ -225,9 +230,9 @@ def _check_predicates_and_arity(facts, rules):
         note(rule.head[0], len(rule.head) - 1, f"rule {ri}, head")
         for bi, lit in enumerate(rule.body):
             note(lit.atom[0], len(lit.atom) - 1, f"rule {ri}, body literal {bi}")
-    if len(arity) > MAX_PREDICATES:
+    if len(arity) > max_predicates:
         raise LimitError(
-            f"too many distinct predicates: {len(arity)} > limit {MAX_PREDICATES}"
+            f"too many distinct predicates: {len(arity)} > limit {max_predicates}"
         )
     return arity
 
