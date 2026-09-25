@@ -1,6 +1,6 @@
 """Deterministic offline demo of the stratified Datalog engine.
 
-Computes, in well under 8 seconds and with no I/O beyond stdout:
+Computes, in well under 90 seconds and with no I/O beyond stdout:
 
   1. a normal result   -- recursive reachability + stratified negation on a
                           deterministically generated graph, with query
@@ -9,7 +9,12 @@ Computes, in well under 8 seconds and with no I/O beyond stdout:
                           the engine returns an explicitly *incomplete*
                           result instead of a partial answer;
   3. a real exception  -- a program with a dependency cycle through
-                          negation is rejected with StratificationError.
+                          negation is rejected with StratificationError;
+  4. aggregation       -- grouped count/sum over lower-stratum facts
+                          (including a negative sum and an empty group),
+                          with aggregate provenance;
+  5. a real exception  -- a recursion cycle through an aggregate edge is
+                          rejected with StratificationError.
 
 Run:  python demo.py
 """
@@ -18,12 +23,15 @@ from datalog import (
     Rule,
     StratificationError,
     Var,
+    agg_count,
+    agg_sum,
     evaluate,
     neg,
     pos,
 )
 
 X, Y, Z = Var("X"), Var("Y"), Var("Z")
+D, E, A, C, S = (Var(n) for n in ("D", "E", "A", "C", "S"))
 
 
 def build_graph():
@@ -78,6 +86,50 @@ def main():
     ]
     try:
         evaluate([("node", 1)], bad_rules)
+        print("ERROR: expected StratificationError was not raised")
+    except StratificationError as exc:
+        print(f"StratificationError raised as expected:\n  {exc}")
+
+    print()
+    print("=" * 68)
+    print("4) Grouped aggregation: count + sum over lower-stratum facts")
+    print("=" * 68)
+    dept_facts = [
+        ("dept", "eng"), ("dept", "ops"), ("dept", "empty"),
+        ("emp", "e1", "eng"), ("emp", "e2", "eng"), ("emp", "e3", "ops"),
+        ("txn", "eng", 120), ("txn", "eng", -20), ("txn", "ops", -7),
+    ]
+    dept_rules = [
+        Rule(("headcount", D, C),
+             [pos("dept", D), agg_count("emp", E, D, group=(D,), into=C)]),
+        Rule(("balance", D, S),
+             [pos("dept", D), agg_sum("txn", D, A, group=(D,), value=A, into=S)]),
+        Rule(("has_balance", D), [pos("balance", D, S)]),
+        Rule(("no_books", D), [pos("dept", D), neg("has_balance", D)]),
+    ]
+    agg_res = evaluate(dept_facts, dept_rules)
+    print(f"complete={agg_res.complete}")
+    print("  headcount per dept (empty dept -> 0, explicit domain):")
+    for f in agg_res.query("headcount", D, C):
+        print(f"    headcount({f[1]!r}) = {f[2]}")
+    print("  balance per dept (negative integers sum exactly):")
+    for f in agg_res.query("balance", D, S):
+        print(f"    balance({f[1]!r}) = {f[2]}")
+    print(f"  depts with no balance row (negation over aggregate): "
+          f"{[f[1] for f in agg_res.query('no_books', D)]}")
+    print("\nAggregate provenance for balance('eng', 100):")
+    print(agg_res.explain(("balance", "eng", 100)))
+
+    print()
+    print("=" * 68)
+    print("5) Triggered rejection: recursion cycle through an aggregate edge")
+    print("=" * 68)
+    bad_agg_rules = [
+        Rule(("p", X, C),
+             [pos("node", X), agg_count("p", X, Y, group=(X,), into=C)]),
+    ]
+    try:
+        evaluate([("node", 1)], bad_agg_rules)
         print("ERROR: expected StratificationError was not raised")
     except StratificationError as exc:
         print(f"StratificationError raised as expected:\n  {exc}")

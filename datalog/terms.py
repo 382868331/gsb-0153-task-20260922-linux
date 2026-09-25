@@ -10,7 +10,8 @@ Representation contract (fixed, public):
   variable).  Facts are atoms whose args are all constants.
 * A **literal** is a ``Literal`` wrapping an atom plus a polarity flag;
   build them with the ``pos(...)`` / ``neg(...)`` helpers.
-* A **rule** is ``Rule(head_atom, [literal, ...])``.
+* A **rule** is ``Rule(head_atom, [literal, ...])``; the last body item
+  may be a single ``Aggregate`` (see ``agg_count`` / ``agg_sum``).
 
 There are no function symbols: nesting atoms inside atoms is rejected.
 """
@@ -69,9 +70,71 @@ def neg(*atom):
     return Literal(atom, False)
 
 
+#: Supported aggregate operations.
+AGG_OPS = ("count", "sum")
+
+
+class Aggregate:
+    """A grouping aggregation; valid only as the *last* item of a rule body.
+
+    * ``op``: ``"count"`` or ``"sum"``.
+    * ``atom``: the aggregated atom.  Its predicate must belong to a
+      strictly lower stratum (an aggregate edge stratifies like a negated
+      edge).  Its variables are either group keys / filter variables bound
+      by the rule's ordinary body, or local existentially-quantified
+      variables (for ``sum``, one of them is the value variable).
+    * ``group``: non-empty tuple of ``Var`` group keys; each must be bound
+      by a positive ordinary body literal — those bindings are the
+      caller-supplied *explicit grouping domain*.  A domain key with no
+      contributing facts yields 0; keys outside the domain yield nothing.
+    * ``value``: the summed ``Var`` (``sum`` only; must occur in ``atom``
+      and not be bound by the ordinary body).  ``None`` for ``count``.
+    * ``result``: the ``Var`` the aggregate value binds to (usable in the
+      head).  Must not occur in the ordinary body literals.
+
+    The aggregated input is the *set* of matching facts: duplicate
+    derivations of the same fact contribute once.
+    """
+
+    __slots__ = ("op", "atom", "group", "value", "result")
+
+    def __init__(self, op, atom, group, value, result):
+        self.op = op
+        self.atom = tuple(atom)
+        self.group = tuple(group)
+        self.value = value
+        self.result = result
+
+    def __repr__(self):
+        group = ", ".join(v.name for v in self.group)
+        if self.op == "sum":
+            return (
+                f"Aggregate(sum {self.value.name} over {self.atom!r} "
+                f"group by ({group}) into {self.result.name})"
+            )
+        return (
+            f"Aggregate(count over {self.atom!r} "
+            f"group by ({group}) into {self.result.name})"
+        )
+
+
+def agg_count(*atom, group, into):
+    """Count distinct facts matching ``atom`` per group: e.g.
+    ``agg_count("sale", D, E, group=(D,), into=C)``."""
+    return Aggregate("count", atom, group, None, into)
+
+
+def agg_sum(*atom, group, value, into):
+    """Sum the integer values of ``value`` over distinct facts matching
+    ``atom`` per group: e.g. ``agg_sum("sale", D, A, group=(D,),
+    value=A, into=S)``."""
+    return Aggregate("sum", atom, group, value, into)
+
+
 class Rule:
     """``Rule(head, body)`` with ``head`` an atom tuple and ``body`` an
-    iterable of ``Literal`` objects (possibly empty)."""
+    iterable of ``Literal`` objects (possibly empty), optionally closed by
+    a single trailing :class:`Aggregate`."""
 
     __slots__ = ("head", "body")
 
@@ -81,10 +144,13 @@ class Rule:
 
     def __repr__(self):
         if self.body:
-            body = ", ".join(
-                ("" if lit.positive else "not ") + repr(lit.atom) for lit in self.body
-            )
-            return f"Rule({self.head!r} :- {body})"
+            parts = []
+            for lit in self.body:
+                if isinstance(lit, Aggregate):
+                    parts.append(repr(lit))
+                else:
+                    parts.append(("" if lit.positive else "not ") + repr(lit.atom))
+            return f"Rule({self.head!r} :- {', '.join(parts)})"
         return f"Rule({self.head!r})"
 
 

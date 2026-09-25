@@ -6,6 +6,8 @@ Public API:
     Var(name)                      -- logic variable
     Rule(head, body)               -- rule; head is an atom tuple
     pos(*atom) / neg(*atom)        -- body literals
+    agg_count(*atom, group=, into) -- trailing count aggregate
+    agg_sum(*atom, group=, value=, into) -- trailing sum aggregate
     Result.query / .derivation / .explain / .complete / .facts / .derived
 
 Errors: DatalogError, ValidationError, UnsafeRuleError, LimitError,
@@ -17,6 +19,7 @@ from .engine import (
     MAX_INPUT_FACTS,
     MAX_PREDICATES,
     MAX_RULES,
+    AggDerivation,
     Derivation,
     Result,
     evaluate,
@@ -28,17 +31,30 @@ from .errors import (
     UnsafeRuleError,
     ValidationError,
 )
-from .terms import Literal, Rule, Var, neg, pos
+from .terms import (
+    Aggregate,
+    Literal,
+    Rule,
+    Var,
+    agg_count,
+    agg_sum,
+    neg,
+    pos,
+)
 
 __all__ = [
     "evaluate",
     "Result",
     "Derivation",
+    "AggDerivation",
     "Var",
     "Rule",
     "Literal",
+    "Aggregate",
     "pos",
     "neg",
+    "agg_count",
+    "agg_sum",
     "DatalogError",
     "ValidationError",
     "UnsafeRuleError",
@@ -50,4 +66,4 @@ __all__ = [
     "DEFAULT_FACT_BUDGET",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

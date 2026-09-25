@@ -2,20 +2,29 @@
 
 Pipeline of ``evaluate``:
 
-1. Validate inputs (types, limits, fixed arity, rule safety).
+1. Validate inputs (types, limits, fixed arity, rule safety, aggregate
+   well-formedness).
 2. Build the predicate dependency graph and compute strata; a cycle through
-   a negative edge raises ``StratificationError``.
+   a negative edge *or an aggregate edge* raises ``StratificationError``
+   (aggregates are stratifying: the aggregated predicate must live in a
+   strictly lower stratum, so its fact set is final before use).
 3. Evaluate stratum by stratum (lower strata first); inside one stratum use
    semi-naive delta iteration for positive recursion, producing the least
-   (minimal) model of that stratum.
+   (minimal) model of that stratum.  A rule whose body ends in an
+   ``Aggregate`` computes, per binding of the ordinary body literals (the
+   explicit grouping domain), the count/sum over the *set* of matching
+   lower-stratum facts — empty groups in the domain yield 0.
 4. For every derived fact record the *shortest* derivation (minimal rule-
    application depth), breaking ties by the lexicographically smallest key
-   ``(rule_index, child facts in body order)``.  The per-fact derivations
-   together form a DAG (shared sub-derivations).
+   ``(rule_index, child facts in body order)``.  Aggregate derivations
+   additionally record the group key, the aggregate value, and the
+   contributing facts (their stable, deduplicated identities).  The
+   per-fact derivations together form a DAG (shared sub-derivations).
 5. A global fact budget bounds ``input facts + derived facts``.  If the next
    semi-naive round would exceed it, that round is *not* applied at all and
    an explicitly incomplete ``Result`` (``complete=False``) is returned —
-   never a partial answer masquerading as a complete one.
+   never a partial answer masquerading as a complete one, and never a
+   partially published aggregate total.
 """
 
 from __future__ import annotations
@@ -29,6 +38,8 @@ from .errors import (
     ValidationError,
 )
 from .terms import (
+    AGG_OPS,
+    Aggregate,
     Literal,
     Rule,
     Var,
@@ -51,6 +62,19 @@ DEFAULT_FACT_BUDGET = 100_000
 #: body literals, in body order.  Negated literals contribute no children
 #: (they are absence checks, not derivations).
 Derivation = namedtuple("Derivation", ["rule_index", "children"])
+
+
+#: Derivation of a fact produced by a rule whose body ends in an
+#: ``Aggregate``.  ``rule_index``/``children`` are as in ``Derivation``
+#: (children = the facts matched to the ordinary positive body literals).
+#: ``op`` is "count"/"sum", ``group`` the group-key tuple, ``value`` the
+#: aggregate value, and ``contributors`` the deduplicated contributing
+#: facts (their stable identities — facts are set-deduplicated, so the
+#: tuple *is* the stable ID), sorted by the canonical fact order.
+AggDerivation = namedtuple(
+    "AggDerivation",
+    ["rule_index", "children", "op", "group", "value", "contributors"],
+)
 
 
 # --- Ordering keys (mixed int/float/str constants must be comparable) -----
@@ -112,8 +136,10 @@ class Result:
         return hits
 
     def derivation(self, fact):
-        """The recorded :class:`Derivation` for ``fact``, or ``None`` for an
-        input fact.  Raises ``KeyError`` for a fact not in the result."""
+        """The recorded derivation for ``fact``: a :class:`Derivation`, or
+        an :class:`AggDerivation` for facts produced by an aggregate rule.
+        ``None`` for an input fact.  Raises ``KeyError`` for a fact not in
+        the result."""
         fact = tuple(fact)
         if fact not in self.facts:
             raise KeyError(f"unknown fact {fact!r}")
@@ -131,6 +157,18 @@ class Result:
             pad = "  " * depth
             if d is None:
                 lines.append(f"{pad}{_fmt_fact(f)}  [input fact]")
+                return
+            if isinstance(d, AggDerivation):
+                lines.append(
+                    f"{pad}{_fmt_fact(f)}  <= rule {d.rule_index} "
+                    f"[{d.op} = {d.value} over group {d.group!r}]: "
+                    f"{self._rules[d.rule_index]!r}"
+                )
+                for child in d.children:
+                    walk(child, depth + 1)
+                lines.append(f"{pad}  contributors ({len(d.contributors)}):")
+                for c in d.contributors:
+                    walk(c, depth + 2)
                 return
             lines.append(f"{pad}{_fmt_fact(f)}  <= rule {d.rule_index}: {self._rules[d.rule_index]!r}")
             for child in d.children:
@@ -169,6 +207,49 @@ def _validate_facts(facts):
     return out
 
 
+def _check_aggregate(lit, lwhere):
+    """Structural validation of one Aggregate (binding checks live in
+    ``_check_safety``, which sees the whole rule)."""
+    if lit.op not in AGG_OPS:
+        raise ValidationError(
+            f"{lwhere}: unknown aggregate op {lit.op!r} (expected one of {AGG_OPS})"
+        )
+    if not lit.atom:
+        raise ValidationError(f"{lwhere}: aggregated atom must be a non-empty tuple")
+    check_predicate(lit.atom[0], lwhere)
+    for j, arg in enumerate(lit.atom[1:]):
+        check_term(arg, f"{lwhere}, aggregated atom argument {j}")
+    if not lit.group:
+        raise ValidationError(
+            f"{lwhere}: group must be a non-empty tuple of Vars "
+            f"(global aggregation is not supported)"
+        )
+    for g in lit.group:
+        if not isinstance(g, Var):
+            raise ValidationError(
+                f"{lwhere}: group keys must be Vars, got {g!r}"
+            )
+    if len(set(lit.group)) != len(lit.group):
+        raise ValidationError(f"{lwhere}: duplicate variable in group keys")
+    if lit.op == "count":
+        if lit.value is not None:
+            raise ValidationError(f"{lwhere}: count takes no value variable")
+    else:  # sum
+        if not isinstance(lit.value, Var):
+            raise ValidationError(
+                f"{lwhere}: sum requires a value Var, got {lit.value!r}"
+            )
+        if lit.value not in atom_vars(lit.atom):
+            raise ValidationError(
+                f"{lwhere}: sum value variable {lit.value.name!r} does not "
+                f"occur in the aggregated atom"
+            )
+    if not isinstance(lit.result, Var):
+        raise ValidationError(
+            f"{lwhere}: aggregate result must be a Var, got {lit.result!r}"
+        )
+
+
 def _validate_rules(rules):
     if isinstance(rules, (str, bytes)) or not hasattr(rules, "__iter__"):
         raise ValidationError(
@@ -186,8 +267,17 @@ def _validate_rules(rules):
         for j, arg in enumerate(head[1:]):
             check_term(arg, f"{where}, head argument {j}")
         body = []
+        n_body = len(rule.body)
         for bi, lit in enumerate(rule.body):
             lwhere = f"{where}, body literal {bi}"
+            if isinstance(lit, Aggregate):
+                if bi != n_body - 1:
+                    raise ValidationError(
+                        f"{lwhere}: an aggregate must be the last body literal"
+                    )
+                _check_aggregate(lit, lwhere)
+                body.append(lit)
+                continue
             if not isinstance(lit, Literal):
                 raise ValidationError(f"{lwhere}: expected a Literal (use pos()/neg()), got {lit!r}")
             if not isinstance(lit.positive, bool):
@@ -232,18 +322,48 @@ def _check_predicates_and_arity(facts, rules):
     return arity
 
 
+def _split_body(rule):
+    """``(ordinary_literals, aggregate_or_None)`` for a validated rule."""
+    if rule.body and isinstance(rule.body[-1], Aggregate):
+        return rule.body[:-1], rule.body[-1]
+    return rule.body, None
+
+
 def _check_safety(rules):
     for ri, rule in enumerate(rules):
+        ordinary, agg = _split_body(rule)
         pos_vars = set()
-        for lit in rule.body:
+        for lit in ordinary:
             if lit.positive:
                 pos_vars |= atom_vars(lit.atom)
-        for v in sorted(atom_vars(rule.head) - pos_vars, key=lambda v: v.name):
+        bound = set(pos_vars)
+        if agg is not None:
+            ordinary_vars = set()
+            for lit in ordinary:
+                ordinary_vars |= atom_vars(lit.atom)
+            for v in sorted((g for g in agg.group if g not in pos_vars),
+                            key=lambda v: v.name):
+                raise UnsafeRuleError(
+                    f"rule {ri}: group key {v.name!r} is not bound by a "
+                    f"positive ordinary body literal (unsafe rule)"
+                )
+            if agg.result in ordinary_vars:
+                raise UnsafeRuleError(
+                    f"rule {ri}: aggregate result variable {agg.result.name!r} "
+                    f"is already bound by an ordinary body literal"
+                )
+            if agg.op == "sum" and agg.value in ordinary_vars:
+                raise UnsafeRuleError(
+                    f"rule {ri}: sum value variable {agg.value.name!r} must be "
+                    f"local to the aggregated atom, not bound by the ordinary body"
+                )
+            bound.add(agg.result)
+        for v in sorted(atom_vars(rule.head) - bound, key=lambda v: v.name):
             raise UnsafeRuleError(
                 f"rule {ri}: head variable {v.name!r} does not appear in a "
                 f"positive body literal (unsafe rule)"
             )
-        for bi, lit in enumerate(rule.body):
+        for bi, lit in enumerate(ordinary):
             if not lit.positive:
                 for v in sorted(atom_vars(lit.atom) - pos_vars, key=lambda v: v.name):
                     raise UnsafeRuleError(
@@ -260,13 +380,20 @@ def _stratify(predicates, rules):
 
     Positive dependency: stratum(head) >= stratum(body).
     Negative dependency: stratum(head) >= stratum(body) + 1.
+    Aggregate dependency: stratum(head) >= stratum(aggregated) + 1 — an
+    aggregate stratifies like negation, so the aggregated predicate's fact
+    set is final before the aggregate is computed.
     Relaxation converges iff no dependency cycle passes through a negative
-    edge; otherwise raise StratificationError naming the predicates.
+    or aggregate edge; otherwise raise StratificationError naming the
+    predicates.
     """
-    edges = []  # (head_pred, body_pred, is_negative, rule_index)
+    edges = []  # (head_pred, body_pred, is_stratifying, rule_index)
     for ri, rule in enumerate(rules):
         for lit in rule.body:
-            edges.append((rule.head[0], lit.atom[0], not lit.positive, ri))
+            if isinstance(lit, Aggregate):
+                edges.append((rule.head[0], lit.atom[0], True, ri))
+            else:
+                edges.append((rule.head[0], lit.atom[0], not lit.positive, ri))
 
     stratum = {p: 0 for p in predicates}
     n = len(predicates)
@@ -281,12 +408,13 @@ def _stratify(predicates, rules):
             break
     else:
         # Relaxation did not converge within n+1 passes: some dependency
-        # cycle passes through a negative edge.  Any legitimate stratum
-        # number is < n, so predicates inflated to >= n lie on (or
+        # cycle passes through a negative or aggregate edge.  Any legitimate
+        # stratum number is < n, so predicates inflated to >= n lie on (or
         # downstream of) such a cycle.
         bad = sorted(p for p in predicates if stratum[p] >= n)
         raise StratificationError(
-            "dependency cycle through a negative edge; predicates involved: "
+            "dependency cycle through a negative or aggregate edge; "
+            "predicates involved: "
             + ", ".join(repr(p) for p in bad)
         )
     return stratum
@@ -354,21 +482,72 @@ def _substitute(atom, env):
     return (atom[0],) + tuple(env[a] if isinstance(a, Var) else a for a in atom[1:])
 
 
+def _eval_aggregate(agg, env, store, ri):
+    """Compute one aggregate for one ordinary-body binding ``env``.
+
+    Returns ``(value, contributors)`` where ``contributors`` is the sorted
+    tuple of distinct matching facts.  The aggregated predicate lives in a
+    strictly lower stratum, so ``store`` for it is final — each total is
+    computed completely, exactly once per group binding.  An empty match
+    yields 0 (the group key came from the explicit domain: the ordinary
+    body binding).
+    """
+    pred = agg.atom[0]
+    args = agg.atom[1:]
+    contribs = []
+    for fact in store.get(pred, ()):
+        local = {}
+        ok = True
+        for a, v in zip(args, fact[1:]):
+            if isinstance(a, Var):
+                if a in env:  # correlated with the ordinary body (e.g. group key)
+                    if env[a] != v:
+                        ok = False
+                        break
+                elif a in local:
+                    if local[a] != v:
+                        ok = False
+                        break
+                else:
+                    local[a] = v
+            elif a != v:
+                ok = False
+                break
+        if ok:
+            contribs.append((fact, local))
+    if agg.op == "count":
+        value = len(contribs)
+    else:  # sum
+        value = 0
+        for fact, local in contribs:
+            x = local[agg.value]  # value var is local to the atom (checked)
+            if isinstance(x, bool) or not isinstance(x, int):
+                raise ValidationError(
+                    f"rule {ri}: sum value must be an int, got {x!r} "
+                    f"in contributing fact {_fmt_fact(fact)}"
+                )
+            value += x
+    contributors = tuple(sorted((f for f, _ in contribs), key=_fact_key))
+    return value, contributors
+
+
 def _eval_stratum(stratum_preds, stratum_rules, store, depth, prov, total, max_facts):
     """Semi-naive least-model computation for one stratum.
 
     Returns ``(complete, total, reason)``; on budget overflow the offending
-    round is discarded wholesale (no partial round is applied).
+    round is discarded wholesale (no partial round is applied — in
+    particular no partially published aggregate totals).
     """
     delta = {p: set(store.get(p, ())) for p in stratum_preds}
     round_no = 0
     while True:
         if round_no > 0 and not any(delta[p] for p in stratum_preds):
             return True, total, None
-        candidates = {}  # fact -> (key, children)
+        candidates = {}  # fact -> (key, children, agg_info)
         for ri, rule in stratum_rules:
-            pos_lits = [l for l in rule.body if l.positive]
-            neg_lits = [l for l in rule.body if not l.positive]
+            ordinary, agg = _split_body(rule)
+            pos_lits = [l for l in ordinary if l.positive]
+            neg_lits = [l for l in ordinary if not l.positive]
             recursive = [i for i, l in enumerate(pos_lits) if l.atom[0] in stratum_preds]
             if not recursive:
                 if round_no > 0:
@@ -380,6 +559,12 @@ def _eval_stratum(stratum_preds, stratum_rules, store, depth, prov, total, max_f
                 for env, children in _join(pos_lits, store, delta, d):
                     if neg_lits and not _negated_ok(neg_lits, env, store):
                         continue
+                    agg_info = None
+                    if agg is not None:
+                        value, contributors = _eval_aggregate(agg, env, store, ri)
+                        env[agg.result] = value
+                        agg_info = (agg.op, tuple(env[g] for g in agg.group),
+                                    value, contributors)
                     head = _substitute(rule.head, env)
                     hpred = head[0]
                     if head in store.get(hpred, ()):
@@ -389,7 +574,7 @@ def _eval_stratum(stratum_preds, stratum_rules, store, depth, prov, total, max_f
                     key = (new_depth, ri, tuple(_fact_key(c) for c in children))
                     prev = candidates.get(head)
                     if prev is None or key < prev[0]:
-                        candidates[head] = (key, children)
+                        candidates[head] = (key, children, agg_info)
         if not candidates:
             return True, total, None
         if total + len(candidates) > max_facts:
@@ -400,11 +585,15 @@ def _eval_stratum(stratum_preds, stratum_rules, store, depth, prov, total, max_f
                 f"{len(candidates)} facts in the next round > budget {max_facts}",
             )
         new_delta = {p: set() for p in stratum_preds}
-        for fact, (key, children) in candidates.items():
+        for fact, (key, children, agg_info) in candidates.items():
             new_depth, ri, _ = key
             store.setdefault(fact[0], set()).add(fact)
             depth[fact] = new_depth
-            prov[fact] = Derivation(ri, children)
+            if agg_info is None:
+                prov[fact] = Derivation(ri, children)
+            else:
+                op, group, value, contributors = agg_info
+                prov[fact] = AggDerivation(ri, children, op, group, value, contributors)
             new_delta[fact[0]].add(fact)
         total += len(candidates)
         delta = new_delta
@@ -428,10 +617,14 @@ def evaluate(facts, rules, *, max_facts=DEFAULT_FACT_BUDGET):
         budget stopped the computation; ``result.reason`` then says why.
 
     Raises:
-        ValidationError: malformed input (located message).
-        UnsafeRuleError: head/negated variable not bound positively.
+        ValidationError: malformed input (located message); also raised when
+            a ``sum`` encounters a non-integer value at evaluation time.
+        UnsafeRuleError: head/negated variable not bound positively, or an
+            aggregate group key is unbound / the result or sum-value
+            variable collides with an ordinary-body variable.
         LimitError: more than 20 predicates / 100 rules / 2000 facts.
-        StratificationError: dependency cycle through a negative edge.
+        StratificationError: dependency cycle through a negative *or
+            aggregate* edge.
     """
     if isinstance(max_facts, bool) or not isinstance(max_facts, int):
         raise ValidationError(
