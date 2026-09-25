@@ -10,7 +10,9 @@ Representation contract (fixed, public):
   variable).  Facts are atoms whose args are all constants.
 * A **literal** is a ``Literal`` wrapping an atom plus a polarity flag;
   build them with the ``pos(...)`` / ``neg(...)`` helpers.
-* A **rule** is ``Rule(head_atom, [literal, ...])``.
+* A **rule** is ``Rule(head_atom, [literal, ...], aggregate=None)``; the
+  optional :class:`Aggregate` turns the rule into a group aggregate
+  (``count`` / ``sum``) evaluated as a stratum boundary.
 
 There are no function symbols: nesting atoms inside atoms is rejected.
 """
@@ -69,23 +71,75 @@ def neg(*atom):
     return Literal(atom, False)
 
 
+class Aggregate:
+    """A group aggregate appended to a rule body: ``Aggregate(func, value)``.
+
+    ``func`` is ``"count"`` or ``"sum"``.  For ``count`` the ``value`` is
+    ignored (conventionally ``None``) and the head's last column is the
+    number of distinct fact tuples contributed per group.  For ``sum`` the
+    ``value`` must be a :class:`Var` bound in a positive body literal; the
+    head's last column is the sum of the distinct bound integer values per
+    group (negative integers allowed).
+
+    The group key is every other head argument; each must be a variable
+    bound in a positive body literal.  Empty groups are only produced for
+    keys the caller lists in ``evaluate(..., groups=...)``.
+    """
+
+    __slots__ = ("func", "value")
+
+    def __init__(self, func, value=None):
+        if func not in ("count", "sum"):
+            raise ValidationError(
+                f"aggregate function must be 'count' or 'sum', got {func!r}"
+            )
+        if func == "sum" and not isinstance(value, Var):
+            raise ValidationError(
+                f"sum aggregate value must be a Var, got {value!r}"
+            )
+        self.func = func
+        self.value = value
+
+    def __repr__(self):
+        if self.func == "count":
+            return "Aggregate('count')"
+        return f"Aggregate('sum', {self.value!r})"
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, Aggregate)
+            and self.func == other.func
+            and self.value == other.value
+        )
+
+    def __hash__(self):
+        return hash(("Aggregate", self.func, self.value))
+
+
 class Rule:
-    """``Rule(head, body)`` with ``head`` an atom tuple and ``body`` an
-    iterable of ``Literal`` objects (possibly empty)."""
+    """``Rule(head, body, aggregate=None)`` with ``head`` an atom tuple,
+    ``body`` an iterable of ``Literal`` objects (possibly empty), and an
+    optional :class:`Aggregate`."""
 
-    __slots__ = ("head", "body")
+    __slots__ = ("head", "body", "aggregate")
 
-    def __init__(self, head, body=()):
+    def __init__(self, head, body=(), aggregate=None):
         self.head = tuple(head)
         self.body = tuple(body)
+        self.aggregate = aggregate
 
     def __repr__(self):
         if self.body:
             body = ", ".join(
                 ("" if lit.positive else "not ") + repr(lit.atom) for lit in self.body
             )
-            return f"Rule({self.head!r} :- {body})"
-        return f"Rule({self.head!r})"
+        if self.aggregate is None:
+            if self.body:
+                return f"Rule({self.head!r} :- {body})"
+            return f"Rule({self.head!r})"
+        if self.body:
+            return f"Rule({self.head!r} :- {body} >> {self.aggregate!r})"
+        return f"Rule({self.head!r} :- {self.aggregate!r})"
 
 
 def check_predicate(pred, where):
