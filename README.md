@@ -10,8 +10,11 @@
 ## 快速开始
 
 ```bash
-python -m unittest discover -s tests -v   # 运行测试（含独立朴素参考对照）
-python demo.py                            # 运行演示（约 0.1 秒，远小于 8 秒上限）
+python3.14 -m venv .venv                  # 准备虚拟环境（可选，标准库即可运行）
+source .venv/bin/activate
+python -m unittest discover -s tests -v   # 运行全部测试（含独立参考对照）
+python demo.py                            # 分层引擎演示（约 0.1 秒）
+python demo_iteration.py                  # 良基语义演示：逐轮上下界（约 0.1 秒）
 ```
 
 ## 接口
@@ -72,6 +75,43 @@ res.explain(("reach", "a", "c"))     # 打印来源链（推导 DAG 的文本缩
 
 ## 语义与设计取舍
 
+## 独立入口：良基语义（否定环）
+
+`evaluate_ground(facts, rules, *, max_rounds=128)` 是独立于分层引擎的
+第二入口，面向**已经落地的有限规则**（规则头、体全部无变量；无函数项、
+无聚合、不做变量展开）。它不拒绝穿过负边的依赖环，而是用**交替不动点**
+（alternating fixpoint）按**良基语义**（well-founded semantics）把原子全集
+划分为三组：
+
+```python
+from datalog import evaluate_ground, Rule, neg
+
+rules = [Rule(("a",), [neg("b")]), Rule(("b",), [neg("a")])]
+res = evaluate_ground([], rules)
+res.complete            # True：在轮次预算内收敛
+res.true / res.false / res.undefined   # 三组原子，划分原子全集
+res.status(("a",))       # "undefined"
+res.rounds              # 每轮 (lower, upper) 上下界快照，便于检查收敛
+```
+
+- **原子全集**：输入事实、规则头、规则体出现过的全部原子（落地，故有限），
+  上限 **64** 个（超出报 `LimitError`）。
+- **交替不动点**：`A_0 = {}`，`A_{k+1} = T(A_k)`，其中 `T(J)` 是把
+  `not a` 读作 "a 不在 J 中" 后的最小闭包。偶数项构成下界（确定为真）
+  递增链，奇数项构成上界（可能为真）递减链；`true` = 最终下界，
+  `false` = 全集减最终上界，`undefined` = 上界减下界。**找不到正向证明
+  的原子不会直接当假**——只有同时跌出上界才是 false。
+- **预算耗尽单独返回**：`max_rounds` 耗尽时 `complete=False`、`reason`
+  说明原因，`true/false/undefined` 均为 `None`——绝不把预算耗尽伪装成
+  undefined 的正式答案；`rounds` 轨迹仍可检查。
+- 变量出现在事实或规则中会以带位置信息的 `ValidationError` 拒绝
+  （本入口不做变量展开）。
+
+```bash
+python demo_iteration.py   # 否定环 undefined 示例、加事实消除不确定、预算边界
+```
+
+
 - **分层否定**：按依赖图计算层号（正边同层、负边跨层），逐层求最小模型；
   含负边的环直接拒绝。这是分层 Datalog 的标准语义，不宣称支持
   well-founded / answer-set 等更广义语义。
@@ -94,6 +134,8 @@ res.explain(("reach", "a", "c"))     # 打印来源链（推导 DAG 的文本缩
 
 - 仅集合语义：无包（bag）语义、无聚合、无算术、无析取头、无函数符号。
 - 否定仅支持分层否定；非分层程序（如 `p :- not p`）报 `StratificationError`。
+  需要否定环时改用独立入口 `evaluate_ground`（良基语义，仅落地规则，
+  原子全集上限 64，无变量展开/函数项/聚合）。
 - 每条派生事实只记录一条最优推导 DAG，不保留备选证明。
 - 预算超支时返回的是"已完成轮次"的事实（可能是仅输入事实），调用方必须
   检查 `complete` 后再使用结果。
@@ -107,11 +149,18 @@ datalog/
   errors.py     错误类型体系
   terms.py      Var / Literal / Rule / pos / neg 与项校验
   engine.py     校验、分层、半朴素求值、推导记录、Result
+  wellfounded.py 独立入口：落地规则的良基语义（交替不动点）、WFResult
 tests/
-  test_engine.py  单元测试 + 独立朴素不动点参考 + 随机对照
+  test_engine.py      分层引擎单元测试 + 独立朴素不动点参考 + 随机对照
+  test_wellfounded.py 良基入口测试：枚举候选上下界的独立参考、不动点定义核对、
+                      否定环/加事实/预算耗尽/异常路径
 demo.py         固定输入演示：正常结果 + 预算超支 + 分层拒绝
+demo_iteration.py 良基语义演示：逐轮上下界、否定环、加事实、预算边界
 ```
 
 测试中的期望值来自测试文件内独立编写的朴素不动点参考实现
 （`naive_evaluate`，与被测核心不共享任何代码）及手工计算的小实例；
 引擎与参考在 120 个确定性随机分层程序上结果一致。
+良基入口的期望值来自测试文件内独立编写的**枚举参考**：对小原子全集枚举
+所有候选下界、按定义核对 `T(T(S)) == S` 取最小不动点，与 `evaluate_ground`
+在 60 个确定性随机落地程序上结果一致。

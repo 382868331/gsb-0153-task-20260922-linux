@@ -21,6 +21,13 @@ from .engine import (
     Result,
     evaluate,
 )
+from .wellfounded import (
+    DEFAULT_MAX_ROUNDS,
+    MAX_ATOMS,
+    Round,
+    WFResult,
+    evaluate_ground,
+)
 from .errors import (
     DatalogError,
     LimitError,
@@ -32,7 +39,10 @@ from .terms import Literal, Rule, Var, neg, pos
 
 __all__ = [
     "evaluate",
+    "evaluate_ground",
     "Result",
+    "WFResult",
+    "Round",
     "Derivation",
     "Var",
     "Rule",
@@ -47,7 +57,9 @@ __all__ = [
     "MAX_PREDICATES",
     "MAX_RULES",
     "MAX_INPUT_FACTS",
+    "MAX_ATOMS",
     "DEFAULT_FACT_BUDGET",
+    "DEFAULT_MAX_ROUNDS",
 ]
 
 __version__ = "1.0.0"
