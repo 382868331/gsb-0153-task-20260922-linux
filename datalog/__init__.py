@@ -29,6 +29,12 @@ from .errors import (
     ValidationError,
 )
 from .terms import Literal, Rule, Var, neg, pos
+from .wellfounded import (
+    DEFAULT_MAX_ROUNDS,
+    MAX_ATOMS,
+    WFResult,
+    evaluate_wf,
+)
 
 __all__ = [
     "evaluate",
@@ -48,6 +54,10 @@ __all__ = [
     "MAX_RULES",
     "MAX_INPUT_FACTS",
     "DEFAULT_FACT_BUDGET",
+    "evaluate_wf",
+    "WFResult",
+    "MAX_ATOMS",
+    "DEFAULT_MAX_ROUNDS",
 ]
 
 __version__ = "1.0.0"

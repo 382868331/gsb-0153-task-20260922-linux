@@ -115,3 +115,63 @@ demo.py         固定输入演示：正常结果 + 预算超支 + 分层拒绝
 测试中的期望值来自测试文件内独立编写的朴素不动点参考实现
 （`naive_evaluate`，与被测核心不共享任何代码）及手工计算的小实例；
 引擎与参考在 120 个确定性随机分层程序上结果一致。
+
+## 良基语义入口（否定环，独立于分层引擎）
+
+`datalog.wellfounded.evaluate_wf` 是与分层 `evaluate` **并列的独立入口**，
+接收**已经落地（ground）的有限规则**——无变量、无函数项、无聚合——允许
+否定互相依赖的环，按**良基语义（well-founded semantics）**用**交替不动点**
+求值，把原子全集分成三组：
+
+- `true`：被证明为真的原子；
+- `false`：被证明为假（上层界已排除）的原子——**不是**"找不到正向证明
+  就当假"；
+- `undefined`：规则互相否定、暂时无法确定的原子（如 `a :- not b`,
+  `b :- not a`）。
+
+```python
+from datalog import evaluate_wf, Rule, neg
+
+rules = [Rule(("a",), [neg("b")]), Rule(("b",), [neg("a")])]
+res = evaluate_wf([], rules)          # a、b 均为 undefined
+res = evaluate_wf([("a",)], rules)    # 加入事实后：a true，b false
+res.complete        # 是否在轮次预算内收敛
+res.rounds          # 每轮 (下界, 上界) 快照，便于检查收敛
+```
+
+### 交替不动点定义
+
+原子全集 = 事实 ∪ 规则头 ∪ 规则体原子（含否定体）。令 `T(I)` 为把
+`not a` 按 `a ∉ I` 解释后的正程序最小模型。从 `A0 = ∅` 起迭代
+`A(i+1) = T(A(i))`：偶数项构成递增下界（确定为真），奇数项构成递减
+上界（可能为真）。当 `A(n+2) == A(n)` 收敛：`true = A偶`，
+`false = 全集 - A奇`，`undefined = A奇 - A偶`。
+
+### 输入上限与预算（本入口）
+
+| 量 | 上限 |
+|---|---|
+| 原子全集大小 | 64 |
+| 规则数 | 200 |
+| 迭代轮次预算 `max_rounds` | 参数，默认 128 |
+
+- 含变量、非 Rule/Literal 结构、非法常量：`ValidationError`（可定位）。
+- 超原子/规则上限：`LimitError`。
+- **轮次预算耗尽**：返回 `complete=False` 且 `reason` 说明的结果，部分
+  上下界留在 `rounds` 中供检查——**绝不伪装成 undefined 的正式答案**。
+
+### 运行
+
+```bash
+python -m venv .venv && . .venv/bin/activate   # 准备环境（仅需 Python 3.14.7，无第三方依赖）
+python -m unittest discover -s tests -v        # 全部测试（含独立枚举参考对照与异常路径）
+python demo_iteration.py                       # 良基语义演示：现场计算，远小于 90 秒
+python demo.py                                 # 原分层引擎演示
+```
+
+### 本入口已知限制
+
+- 仅接受落地规则：不做变量展开、不支持函数项与聚合；需要变量展开的程序
+  请先实例化或改用分层入口。
+- 原子全集硬上限 64，面向小规模核对与教学，不做大规模压测。
+- 参考对照测试为朴素枚举（指数级），仅用于小规模实例。
