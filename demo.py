@@ -5,6 +5,9 @@ Computes, in well under 8 seconds and with no I/O beyond stdout:
   1. a normal result   -- recursive reachability + stratified negation on a
                           deterministically generated graph, with query
                           results and a provenance (source) chain;
+  1b. query-directed   -- evaluate_query derives only what the query can
+                          reach, answers match full evaluation, and the
+                          actually-reduced irrelevant work is reported;
   2. a real rejection  -- the fact budget is deliberately set too small, so
                           the engine returns an explicitly *incomplete*
                           result instead of a partial answer;
@@ -19,6 +22,7 @@ from datalog import (
     StratificationError,
     Var,
     evaluate,
+    evaluate_query,
     neg,
     pos,
 )
@@ -57,6 +61,18 @@ def main():
     print(f"nodes unreachable from 0 (via negation): {missing}")
     print("\nProvenance chain for reach(0, 4):")
     print(res.explain(("reach", 0, 4)))
+
+    print()
+    print("=" * 68)
+    print("1b) Query-directed evaluation: reach(0, ?) with known X=0")
+    print("=" * 68)
+    q = evaluate_query(facts, rules, ("reach", 0, X))
+    print(f"complete={q.complete}  answer size={len(q.answer())}")
+    print(f"answer matches full evaluate: {q.answer() == res.query('reach', 0, X)}")
+    print(f"work reduction: {q.stats.summary()}")
+    qn = evaluate_query(facts, rules, ("unreach", X))
+    print(f"negated query unreach(?) = {[f[1] for f in qn.answer()]} "
+          f"(full evaluate agrees: {qn.answer() == res.query('unreach', X)})")
 
     print()
     print("=" * 68)

@@ -3,6 +3,7 @@
 Public API:
 
     evaluate(facts, rules, *, max_facts=...) -> Result
+    evaluate_query(facts, rules, query, *, max_facts=...) -> QueryResult
     Var(name)                      -- logic variable
     Rule(head, body)               -- rule; head is an atom tuple
     pos(*atom) / neg(*atom)        -- body literals
@@ -18,8 +19,11 @@ from .engine import (
     MAX_PREDICATES,
     MAX_RULES,
     Derivation,
+    QueryResult,
+    QueryStats,
     Result,
     evaluate,
+    evaluate_query,
 )
 from .errors import (
     DatalogError,
@@ -32,7 +36,10 @@ from .terms import Literal, Rule, Var, neg, pos
 
 __all__ = [
     "evaluate",
+    "evaluate_query",
     "Result",
+    "QueryResult",
+    "QueryStats",
     "Derivation",
     "Var",
     "Rule",
