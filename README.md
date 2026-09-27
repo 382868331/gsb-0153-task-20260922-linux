@@ -33,7 +33,34 @@ res.facts / res.derived # frozenset：全部事实 / 仅派生事实
 res.query("reach", "a", X)   # 按模式查询，返回排序后的事实列表
 res.derivation(("reach", "a", "c"))  # Derivation(rule_index, children)
 res.explain(("reach", "a", "c"))     # 打印来源链（推导 DAG 的文本缩进树）
+res.stats                   # EvalStats(firings, derived, rounds)：推导工作量计数
 ```
+
+### 按需求值（只展开与查询相关的部分）
+
+调用方指定要查的关系和已知条件后，`evaluate_query` 先做**相关性剪枝**：
+从查询谓词出发沿依赖图（正边**和负边**都跟随）取传递闭包，闭包外的规则
+与输入事实整批剔除，再用与完整求值完全相同的分层半朴素算法求值。负边
+必须跟随——决定否定是否成立的事实一个都不能少，因此递归规则与分层否定
+的语义与完整求值**逐事实一致**（答案、推导 DAG、规则编号均相同）。
+
+```python
+from datalog import evaluate_query
+
+res = evaluate_query(facts, rules, "reach", "a", X, measure_baseline=True)
+res.answers                 # 已按模式过滤好的答案（== 完整求值的 query 结果）
+res.focus                   # FocusStats：相关性报告
+res.focus.relevant_predicates   # 实际参与展开的谓词
+res.focus.pruned_rules          # 被剔除规则的原序号
+res.focus.pruned_facts          # 被剔除的输入事实数
+res.focus.derivations_avoided   # 实际减少的推导次数（规则触发数之差）
+```
+
+- `derivations_avoided` 需要一次完整求值作基线，故仅在
+  `measure_baseline=True` 时填充（默认 `None`，聚焦求值本身不做无用功）。
+- `max_facts` 预算作用于聚焦后的运行（相关输入事实 + 派生事实）。
+- 结果 `res.facts` 是完整模型在相关谓词上的切片；查询无关谓词得到空集。
+- 完整求值 `evaluate` 原样保留，两者可互换使用。
 
 ### 数据契约（固定公开结构）
 
@@ -89,6 +116,10 @@ res.explain(("reach", "a", "c"))     # 打印来源链（推导 DAG 的文本缩
   因此无浮点误差区间问题；查询与推导均为精确匹配。
 - **连接求值**：正体按书写顺序回溯连接，未做连接顺序优化/索引——上限规模
   （20 谓词 / 100 规则 / 2000 事实）下足够，换取实现的简单与可审计。
+- **按需求值**：剪枝在谓词依赖图层面进行（不做常量级 magic-set 变换），
+  因此永远可靠：相关闭包内的求值与完整求值使用同一份核心代码
+  （`_evaluate_core`），规则保持原始编号，推导记录逐条一致。
+  `evaluate_query` 的 `pattern` 常量只用于过滤最终答案，不参与剪枝。
 
 ## 已知限制
 
@@ -97,6 +128,9 @@ res.explain(("reach", "a", "c"))     # 打印来源链（推导 DAG 的文本缩
 - 每条派生事实只记录一条最优推导 DAG，不保留备选证明。
 - 预算超支时返回的是"已完成轮次"的事实（可能是仅输入事实），调用方必须
   检查 `complete` 后再使用结果。
+- `evaluate_query` 只对查询谓词的依赖闭包分层；若不可分层部分与查询
+  无关，聚焦查询可以成功而完整求值会报 `StratificationError`（这是
+  按需求值的自然性质，不是静默纠错）。
 - 随机对照测试覆盖小随机分层程序（120 个种子）；未做上限规模的性能压测。
 
 ## 代码结构
@@ -106,12 +140,15 @@ datalog/
   __init__.py   公共导出
   errors.py     错误类型体系
   terms.py      Var / Literal / Rule / pos / neg 与项校验
-  engine.py     校验、分层、半朴素求值、推导记录、Result
+  engine.py     校验、分层、半朴素求值、推导记录、Result、按需求值
 tests/
   test_engine.py  单元测试 + 独立朴素不动点参考 + 随机对照
-demo.py         固定输入演示：正常结果 + 预算超支 + 分层拒绝
+  test_query.py   按需求值：与完整求值的一致性、剪枝与减少量记录
+demo.py         固定输入演示：正常结果 + 预算超支 + 分层拒绝 + 按需求值
 ```
 
 测试中的期望值来自测试文件内独立编写的朴素不动点参考实现
 （`naive_evaluate`，与被测核心不共享任何代码）及手工计算的小实例；
-引擎与参考在 120 个确定性随机分层程序上结果一致。
+引擎与参考在 120 个确定性随机分层程序上结果一致；按需求值在同一批
+随机程序上逐谓词与完整求值对照（答案、推导记录、相关切片完全一致，
+且规则触发数不多于完整求值）。

@@ -10,6 +10,9 @@ Computes, in well under 8 seconds and with no I/O beyond stdout:
                           result instead of a partial answer;
   3. a real exception  -- a program with a dependency cycle through
                           negation is rejected with StratificationError.
+  4. demand-driven querying -- evaluate_query answers one relation while
+     pruning irrelevant rules/facts, reporting how much irrelevant
+     derivation was avoided.
 
 Run:  python demo.py
 """
@@ -19,6 +22,7 @@ from datalog import (
     StratificationError,
     Var,
     evaluate,
+    evaluate_query,
     neg,
     pos,
 )
@@ -81,6 +85,31 @@ def main():
         print("ERROR: expected StratificationError was not raised")
     except StratificationError as exc:
         print(f"StratificationError raised as expected:\n  {exc}")
+
+    print()
+    print("=" * 68)
+    print("4) Demand-driven query: prune irrelevant derivation")
+    print("=" * 68)
+    # Add a sub-program that cannot influence reachability queries.
+    extra_facts = [("color", c) for c in ("red", "green", "blue")]
+    extra_rules = [
+        Rule(("hue", X), [pos("color", X)]),                        # 4
+        Rule(("shade", X), [pos("hue", X), neg("color", "none")]),  # 5
+    ]
+    all_facts = facts + extra_facts
+    all_rules = rules + extra_rules
+    foc = evaluate_query(all_facts, all_rules, "reach", 0, X,
+                         measure_baseline=True)
+    full = evaluate(all_facts, all_rules)
+    print(f"query: reach(0, X)  answers={[f[2] for f in foc.answers]}")
+    print(f"answers identical to full evaluation: "
+          f"{foc.answers == full.query('reach', 0, X)}")
+    print(f"relevant predicates: {sorted(foc.focus.relevant_predicates)}")
+    print(f"pruned rules (original indices): {list(foc.focus.pruned_rules)}")
+    print(f"pruned input facts: {foc.focus.pruned_facts}")
+    print(f"rule firings: focused={foc.stats.firings}  "
+          f"full={full.stats.firings}  "
+          f"avoided={foc.focus.derivations_avoided}")
 
 
 if __name__ == "__main__":
